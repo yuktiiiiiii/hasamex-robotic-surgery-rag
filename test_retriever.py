@@ -1,5 +1,5 @@
 from rag.parser import parse_multiple_transcripts
-from rag.chunker import create_chunks
+from rag.chunks import create_chunks
 from rag.retriever import TranscriptRetriever
 
 
@@ -12,14 +12,19 @@ def main():
 
     print(f"Total chunks: {len(chunks)}")
 
-    # 3. Build dense retriever
+    # 3. Build hybrid retriever
     retriever = TranscriptRetriever()
     retriever.build_index(chunks)
 
     # 4. Test query
     query = "What are the main barriers to adoption?"
 
-    results = retriever.search(query, top_k=3)
+    # 5. Search only within France for this test
+    results = retriever.search(
+        query,
+        top_k=3,
+        market="France",
+    )
 
     print("\nTop results:\n")
 
@@ -29,7 +34,10 @@ def main():
         print(f"Expert: {result['expert']}")
         print(f"Timestamp: {result['timestamp']}")
         print(f"Speaker: {result['speaker']}")
-        print(f"Score: {result['score']:.4f}")
+        print(
+            f"Retrieval Score: "
+            f"{result['retrieval_score']:.4f}"
+        )
         print(f"Text: {result['text']}")
 
 

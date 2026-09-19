@@ -8,21 +8,23 @@ from .parser import TranscriptTurn
 
 def create_chunks(turns: list[TranscriptTurn]) -> list[dict[str, Any]]:
     """
-    Convert parsed transcript turns into RAG-ready chunks.
+    Create RAG chunks from expert responses only.
 
-    Each timestamped speaker turn becomes one chunk.
-    We preserve the original transcript text and all source metadata
-    so answers can always be traced back to the transcript.
+    Interviewer questions are excluded because the application
+    should retrieve evidence from expert answers.
     """
     chunks: list[dict[str, Any]] = []
 
-    for index, turn in enumerate(turns):
+    for turn in turns:
+        # Ignore interviewer questions.
+        if turn.speaker.strip().lower() == "interviewer":
+            continue
+
         chunk = asdict(turn)
 
-        chunk["chunk_index"] = index
+        chunk["chunk_index"] = len(chunks)
 
-        # Text used for embedding/retrieval.
-        # Including metadata helps retrieval distinguish experts/markets.
+        # Text used for embedding and retrieval.
         chunk["retrieval_text"] = (
             f"Expert: {turn.expert}\n"
             f"Role: {turn.role}\n"
