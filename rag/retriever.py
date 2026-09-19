@@ -12,12 +12,13 @@ class TranscriptRetriever:
     """
     Hybrid retriever for expert interview transcripts.
 
-    Uses:
-    - Sentence Transformers + FAISS for semantic retrieval
-    - BM25 for keyword retrieval
-    - Reciprocal Rank Fusion (RRF) for combining results
+    Retrieval pipeline:
+    1. Dense semantic retrieval using Sentence Transformers + FAISS
+    2. BM25 keyword retrieval
+    3. Reciprocal Rank Fusion (RRF)
+    4. Dense relevance gate to reject weak/irrelevant matches
 
-    Supports filtering by expert or market.
+    Supports optional filtering by market or expert.
     """
 
     def __init__(
@@ -35,7 +36,10 @@ class TranscriptRetriever:
 
         self.tokenized_documents: list[list[str]] = []
 
-    def build_index(self, chunks: list[dict[str, Any]]) -> None:
+    def build_index(
+        self,
+        chunks: list[dict[str, Any]],
+    ) -> None:
         """Build FAISS and BM25 indexes."""
 
         if not chunks:
@@ -48,7 +52,9 @@ class TranscriptRetriever:
             for chunk in chunks
         ]
 
+        # -------------------------------------------------
         # Dense embeddings
+        # -------------------------------------------------
         embeddings = self.model.encode(
             texts,
             normalize_embeddings=True,
@@ -62,10 +68,19 @@ class TranscriptRetriever:
 
         dimension = self.embeddings.shape[1]
 
-        self.faiss_index = faiss.IndexFlatIP(dimension)
-        self.faiss_index.add(self.embeddings)
+        # Inner product on normalized vectors
+        # is equivalent to cosine similarity.
+        self.faiss_index = faiss.IndexFlatIP(
+            dimension
+        )
 
+        self.faiss_index.add(
+            self.embeddings
+        )
+
+        # -------------------------------------------------
         # BM25
+        # -------------------------------------------------
         self.tokenized_documents = [
             self._tokenize(text)
             for text in texts
@@ -76,7 +91,9 @@ class TranscriptRetriever:
         )
 
     @staticmethod
-    def _tokenize(text: str) -> list[str]:
+    def _tokenize(
+        text: str,
+    ) -> list[str]:
         """Simple lowercase tokenizer."""
         return text.lower().split()
 
@@ -85,7 +102,11 @@ class TranscriptRetriever:
         rank: int,
         k: int = 60,
     ) -> float:
-        """Reciprocal Rank Fusion score."""
+        """
+        Reciprocal Rank Fusion score.
+
+        rank starts at 1.
+        """
         return 1.0 / (k + rank)
 
     def search(
@@ -94,39 +115,51 @@ class TranscriptRetriever:
         top_k: int = 5,
         market: str | None = None,
         expert: str | None = None,
+        min_dense_score: float = 0.35,
     ) -> list[dict[str, Any]]:
         """
-        Search transcript chunks.
+        Search transcript chunks using hybrid retrieval.
 
-        Optional filters:
-        - market
-        - expert
-
-        This allows the application to answer the same
-        interview question separately for each expert.
+        A dense similarity threshold is applied before BM25/RRF,
+        which helps prevent unrelated questions from being
+        passed to the answer generator.
         """
 
         if not query.strip():
             return []
 
-        if self.embeddings is None or self.bm25 is None:
+        if (
+            self.embeddings is None
+            or self.bm25 is None
+            or self.faiss_index is None
+        ):
             raise RuntimeError(
                 "Retriever index has not been built."
             )
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # 1. Determine eligible chunks
-        # ---------------------------------------------
+        # -------------------------------------------------
         eligible_indices: list[int] = []
 
         for index, chunk in enumerate(self.chunks):
 
             if market is not None:
-                if chunk["market"].strip().lower() != market.strip().lower():
+                if (
+                    chunk["market"]
+                    .strip()
+                    .lower()
+                    != market.strip().lower()
+                ):
                     continue
 
             if expert is not None:
-                if chunk["expert"].strip().lower() != expert.strip().lower():
+                if (
+                    chunk["expert"]
+                    .strip()
+                    .lower()
+                    != expert.strip().lower()
+                ):
                     continue
 
             eligible_indices.append(index)
@@ -134,9 +167,9 @@ class TranscriptRetriever:
         if not eligible_indices:
             return []
 
-        # ---------------------------------------------
-        # 2. Dense scores
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # 2. Query embedding
+        # -------------------------------------------------
         query_embedding = self.model.encode(
             [query],
             normalize_embeddings=True,
@@ -147,51 +180,76 @@ class TranscriptRetriever:
             dtype="float32",
         )
 
+        # -------------------------------------------------
+        # 3. Dense similarity scores
+        # -------------------------------------------------
         eligible_embeddings = self.embeddings[
             eligible_indices
         ]
 
         dense_scores = (
-            eligible_embeddings @ query_embedding[0]
+            eligible_embeddings
+            @ query_embedding[0]
         )
 
-        dense_order = np.argsort(
+        # -------------------------------------------------
+        # 4. Dense relevance gate
+        # -------------------------------------------------
+        # Keep only chunks that are semantically relevant
+        # enough to the question.
+        relevant_indices: list[int] = []
+
+        dense_score_map: dict[int, float] = {}
+
+        for position, score in enumerate(
             dense_scores
-        )[::-1]
+        ):
+            index = eligible_indices[position]
+            score = float(score)
 
-        dense_ranked = [
-            eligible_indices[int(i)]
-            for i in dense_order[:top_k]
-        ]
+            if score >= min_dense_score:
+                relevant_indices.append(index)
+                dense_score_map[index] = score
 
-        # ---------------------------------------------
-        # 3. BM25 scores
-        # ---------------------------------------------
+        # No sufficiently relevant evidence.
+        if not relevant_indices:
+            return []
+
+        # -------------------------------------------------
+        # 5. Rank relevant chunks using dense retrieval
+        # -------------------------------------------------
+        dense_ranked = sorted(
+            relevant_indices,
+            key=lambda index: dense_score_map[index],
+            reverse=True,
+        )
+
+        dense_ranked = dense_ranked[:top_k]
+
+        # -------------------------------------------------
+        # 6. BM25 retrieval
+        # -------------------------------------------------
         query_tokens = self._tokenize(query)
 
         all_bm25_scores = self.bm25.get_scores(
             query_tokens
         )
 
-        eligible_bm25_scores = np.array(
-            [
+        # IMPORTANT:
+        # BM25 is restricted to chunks that already passed
+        # the dense relevance gate. This prevents unrelated
+        # chunks from coming back just because of a keyword.
+        bm25_ranked = sorted(
+            relevant_indices,
+            key=lambda index: float(
                 all_bm25_scores[index]
-                for index in eligible_indices
-            ]
-        )
+            ),
+            reverse=True,
+        )[:top_k]
 
-        bm25_order = np.argsort(
-            eligible_bm25_scores
-        )[::-1]
-
-        bm25_ranked = [
-            eligible_indices[int(i)]
-            for i in bm25_order[:top_k]
-        ]
-
-        # ---------------------------------------------
-        # 4. Reciprocal Rank Fusion
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # 7. Reciprocal Rank Fusion
+        # -------------------------------------------------
         combined_scores: dict[int, float] = {}
 
         for rank, index in enumerate(
@@ -212,21 +270,37 @@ class TranscriptRetriever:
                 + self._rrf_score(rank)
             )
 
-        # ---------------------------------------------
-        # 5. Final ranking
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # 8. Final ranking
+        # -------------------------------------------------
         ranked_results = sorted(
             combined_scores.items(),
             key=lambda item: item[1],
             reverse=True,
         )
 
+        # -------------------------------------------------
+        # 9. Build result objects
+        # -------------------------------------------------
         results: list[dict[str, Any]] = []
 
-        for index, score in ranked_results[:top_k]:
-            result = dict(self.chunks[index])
+        for index, rrf_score in ranked_results[:top_k]:
 
-            result["retrieval_score"] = float(score)
+            result = dict(
+                self.chunks[index]
+            )
+
+            result["retrieval_score"] = float(
+                rrf_score
+            )
+
+            result["dense_score"] = float(
+                dense_score_map[index]
+            )
+
+            result["bm25_score"] = float(
+                all_bm25_scores[index]
+            )
 
             results.append(result)
 

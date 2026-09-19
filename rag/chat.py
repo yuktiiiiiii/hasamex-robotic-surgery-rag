@@ -58,8 +58,9 @@ class TranscriptChat:
 
         # Search across ALL markets.
         retrieved_chunks = self.retriever.search(
-            query=question,
-            top_k=top_k,
+        query=question,
+        top_k=top_k,
+        min_dense_score=0.35,
         )
 
         if not retrieved_chunks:
