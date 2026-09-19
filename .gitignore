@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment variables / secrets
+.env
+
+# Local RAG storage
+storage/
+
+# IDE files
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

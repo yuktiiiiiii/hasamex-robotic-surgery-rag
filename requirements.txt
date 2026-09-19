@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+jinja2
+sentence-transformers
+faiss-cpu
+rank-bm25
+transformers
+torch
+numpy
+python-dotenv
